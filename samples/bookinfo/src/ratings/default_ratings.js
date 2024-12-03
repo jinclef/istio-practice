@@ -1,21 +1,26 @@
+// Copyright Istio Authors
+//
+//   Licensed under the Apache License, Version 2.0 (the "License");
+//   you may not use this file except in compliance with the License.
+//   You may obtain a copy of the License at
+//
+//       http://www.apache.org/licenses/LICENSE-2.0
+//
+//   Unless required by applicable law or agreed to in writing, software
+//   distributed under the License is distributed on an "AS IS" BASIS,
+//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//   See the License for the specific language governing permissions and
+//   limitations under the License.
+
 var http = require('http')
 var dispatcher = require('httpdispatcher')
 
 var port = parseInt(process.argv[2])
 
+var userAddedRatings = [] // used to demonstrate POST functionality
+
 var unavailable = false
 var healthy = true
-
-// Redis 설정
-const redis = require('redis');
-const redisClient = redis.createClient({
-    host: process.env.REDIS_HOST || 'localhost',
-    port: process.env.REDIS_PORT || 6379
-});
-
-// Redis 연결 이벤트 처리
-redisClient.on('connect', () => console.log('Connected to Redis'));
-redisClient.on('error', (err) => console.error('Redis error:', err));
 
 if (process.env.SERVICE_VERSION === 'v-unavailable') {
     // make the service unavailable once in 60 seconds
@@ -25,12 +30,17 @@ if (process.env.SERVICE_VERSION === 'v-unavailable') {
 }
 
 if (process.env.SERVICE_VERSION === 'v-unhealthy') {
+    // make the service unavailable once in 15 minutes for 15 minutes.
+    // 15 minutes is chosen since the Kubernetes's exponential back-off is reset after 10 minutes
+    // of successful execution
+    // see https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#restart-policy
+    // Kiali shows the last 10 or 30 minutes, so to show the error rate of 50%,
+    // it will be required to run the service for 30 minutes, 15 minutes of each state (healthy/unhealthy)
     setInterval(function () {
         healthy = !healthy
         unavailable = !unavailable
     }, 900000);
 }
-
 
 /**
  * We default to using mongodb, if DB_TYPE is not set to mysql.
@@ -70,16 +80,9 @@ dispatcher.onPost(/^\/ratings\/[0-9]*/, function (req, res) {
   if (process.env.SERVICE_VERSION === 'v2') { // the version that is backed by a database
     res.writeHead(501, {'Content-type': 'application/json'})
     res.end(JSON.stringify({error: 'Post not implemented for database backed ratings'}))
-  } else {
-    putRedisReviews(productId, ratings), function (err, result) {
-        if (err) {
-            res.writeHead(500, {'Content-type': 'application/json'})
-            res.end(JSON.stringify({error: 'could not save ratings to Redis'}))
-        } else {
-            res.writeHead(200, {'Content-type': 'application/json'})
-            res.end(JSON.stringify(result))
-        }
-    }
+  } else { // the version that holds ratings in-memory
+    res.writeHead(200, {'Content-type': 'application/json'})
+    res.end(JSON.stringify(putLocalReviews(productId, ratings)))
   }
 })
 
@@ -177,16 +180,9 @@ dispatcher.onGet(/^\/ratings\/[0-9]*/, function (req, res) {
         // in another half proceed as usual
         var random = Math.random(); // returns [0,1]
         if (random <= 0.5) {
-          getReviewsServiceUnavailable_503(res)
+          getLocalReviewsServiceUnavailable(res)
         } else {
-            getRedisReviews(productId, (err, result) => {
-                if (err) {
-                    getReviewsServiceUnavailable_503(res);
-                } else {
-                    res.writeHead(200, { 'Content-type': 'application/json' });
-                    res.end(JSON.stringify(result));
-                }
-            });
+          getLocalReviewsSuccessful(res, productId)
         }
       }
       else if (process.env.SERVICE_VERSION === 'v-delayed') {
@@ -194,51 +190,20 @@ dispatcher.onGet(/^\/ratings\/[0-9]*/, function (req, res) {
         // in another half proceed as usual
         var random = Math.random(); // returns [0,1]
         if (random <= 0.5) {
-            setTimeout(() => {
-                getRedisReviews(productId, (err, result) => {
-                    if (err) {
-                        getReviewsServiceUnavailable_503(res);
-                    } else {
-                        res.writeHead(200, { 'Content-type': 'application/json' });
-                        res.end(JSON.stringify(result));
-                    }
-                });
-            }, 7000);
+          setTimeout(getLocalReviewsSuccessful, 7000, res, productId)
         } else {
-            getRedisReviews(productId, (err, result) => {
-                if (err) {
-                    getReviewsServiceUnavailable_503(res);
-                } else {
-                    res.writeHead(200, { 'Content-type': 'application/json' });
-                    res.end(JSON.stringify(result));
-                }
-            });
+          getLocalReviewsSuccessful(res, productId)
         }
       }
       else if (process.env.SERVICE_VERSION === 'v-unavailable' || process.env.SERVICE_VERSION === 'v-unhealthy') {
           if (unavailable) {
-              getReviewsServiceUnavailable_503(res)
+              getLocalReviewsServiceUnavailable(res)
           } else {
-            getRedisReviews(productId, (err, result) => {
-                if (err) {
-                    getReviewsServiceUnavailable_503(res);
-                } else {
-                    res.writeHead(200, { 'Content-type': 'application/json' });
-                    res.end(JSON.stringify(result));
-                }
-            });
+              getLocalReviewsSuccessful(res, productId)
           }
       }
       else {
-        getRedisReviews(productId, (err, result) => {
-            if (err) {
-                res.writeHead(500, { 'Content-type': 'application/json' });
-                res.end(JSON.stringify({ error: 'could not load ratings from Redis' }));
-            } else {
-                res.writeHead(200, { 'Content-type': 'application/json' });
-                res.end(JSON.stringify(result));
-            }
-        });
+        getLocalReviewsSuccessful(res, productId)
       }
   }
 })
@@ -253,45 +218,35 @@ dispatcher.onGet('/health', function (req, res) {
     }
 })
 
-// Redis에 데이터를 저장하는 함수
-function putRedisReviews(productId, ratings) {
-    const key = `product:${productId}`;
-    const value = JSON.stringify({
-        id: productId,
-        ratings: ratings
-    });
-    
-    redisClient.set(key, value, (err) => {
-        if (err)  callback(err, null);
-        else      getRedisReviews(productId, callback); // 저장 후 데이터를 반환
-    });
+function putLocalReviews (productId, ratings) {
+  userAddedRatings[productId] = {
+    id: productId,
+    ratings: ratings
+  }
+  return getLocalReviews(productId)
 }
-  
-// Redis에서 데이터를 가져오는 함수
-function getRedisReviews(productId) {
-    return new Promise((resolve, reject) => {
-        const key = `product:${productId}`;
-        redisClient.get(key, (err, data) => {
-            if (err) {
-                reject(err);
-            } else if (data) {
-                resolve(JSON.parse(data));
-            } else {
-                resolve({
-                    id: productId,
-                    ratings: {
-                        'Reviewer1' : 12,
-                        'Reviewer2' : 25 // 확인을 위해 기존과 다른 값 설정
-                    }
-                });
-            }
-        });
-    });
+
+function getLocalReviewsSuccessful(res, productId) {
+  res.writeHead(200, {'Content-type': 'application/json'})
+  res.end(JSON.stringify(getLocalReviews(productId)))
 }
-  
-function getReviewsServiceUnavailable_503(res) {
+
+function getLocalReviewsServiceUnavailable(res) {
   res.writeHead(503, {'Content-type': 'application/json'})
   res.end(JSON.stringify({error: 'Service unavailable'}))
+}
+
+function getLocalReviews (productId) {
+  if (typeof userAddedRatings[productId] !== 'undefined') {
+      return userAddedRatings[productId]
+  }
+  return {
+    id: productId,
+    ratings: {
+      'Reviewer1': 5,
+      'Reviewer2': 4
+    }
+  }
 }
 
 function handleRequest (request, response) {

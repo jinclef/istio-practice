@@ -123,11 +123,51 @@ spec:
       serviceAccountName: bookinfo-ratings
       containers:
       - name: ratings
-        image: docker.io/istio/examples-bookinfo-ratings-v1:1.20.2
-        imagePullPolicy: IfNotPresent
+        # image: docker.io/istio/examples-bookinfo-ratings-v1:1.20.2
+        image: docker.io/seoaribo/ratings:v1
+        # imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         ports:
         - containerPort: 9080
+        env:
+        - name: REDIS_HOST
+          value: "redis"  # Redis 서비스 이름
+        - name: REDIS_PORT
 ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: ratings-v2
+#   labels:
+#     app: ratings
+#     version: v2
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: ratings
+#       version: v2
+#   template:
+#     metadata:
+#       labels:
+#         app: ratings
+#         version: v2
+#     spec:
+#       serviceAccountName: bookinfo-ratings
+#       containers:
+#       - name: ratings
+#         image: ratings:v2
+#         imagePullPolicy: IfNotPresent
+#         env:
+#         - name: SERVICE_VERSION
+#           value: v2
+#         - name: REDIS_HOST
+#           value: redis
+#         - name: REDIS_PORT
+#           value: "6379"
+#         ports:
+#         - containerPort: 9080
+# ---
 ##################################################################################################
 # Reviews service
 ##################################################################################################

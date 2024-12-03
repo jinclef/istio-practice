@@ -50,8 +50,14 @@ spec:
     spec:
       containers:
       - name: ratings
-        image: docker.io/istio/examples-bookinfo-ratings-v1:1.20.2
-        imagePullPolicy: IfNotPresent
+        # image: docker.io/istio/examples-bookinfo-ratings-v1:1.20.2
+        image: docker.io/seoharibo/ratings:v1
+        imagePullPolicy: Always
         ports:
         - containerPort: 9080
+        env:
+        - name: REDIS_HOST
+          value: "redis"  # Redis 서비스 이름
+        - name: REDIS_PORT
+          value: "6379"  # Redis 포트
 ---
